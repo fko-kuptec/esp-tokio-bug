@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::{Shutdown, TcpListener},
+    net::Shutdown,
 };
 
 use esp_idf_svc::{
@@ -8,7 +8,7 @@ use esp_idf_svc::{
     nvs::EspDefaultNvsPartition,
     wifi::{AccessPointConfiguration, AuthMethod, BlockingWifi, Configuration, EspWifi},
 };
-use polling::{Event, Events, Poller};
+use mio::{net::TcpListener, Events, Interest, Poll, Token};
 
 static SSID: &str = "EspWifi";
 static PASSWORD: &str = "s0meth1ng";
@@ -45,38 +45,41 @@ fn main() {
 }
 
 fn run() -> std::io::Result<()> {
-    let socket_key = 1337;
-    let socket = TcpListener::bind("0.0.0.0:80")?;
-    socket.set_nonblocking(true)?;
+    let socket_token = Token(1337);
+    let address = "0.0.0.0:80".parse().unwrap();
+    let mut socket = TcpListener::bind(address)?;
 
-    let poller = Poller::new()?;
-    unsafe { poller.add(&socket, Event::readable(socket_key))? };
+    let mut poller = Poll::new()?;
+    poller
+        .registry()
+        .register(&mut socket, socket_token, Interest::READABLE)?;
 
-    let mut events = Events::new();
+    let mut events = Events::with_capacity(16);
     loop {
         events.clear();
-        poller.wait(&mut events, None)?;
+        poller.poll(&mut events, None)?;
         log::info!("ACCEPT");
 
         for event in events.iter() {
-            if event.key == socket_key {
-                let stream_key = 2664;
+            if event.token() == socket_token {
+                let stream_token = Token(2664);
                 let (mut stream, address) = socket.accept()?;
                 log::info!("connected to {address}");
 
-                stream.set_nonblocking(true)?;
-                unsafe { poller.add(&stream, Event::readable(stream_key))? };
+                poller
+                    .registry()
+                    .register(&mut stream, stream_token, Interest::READABLE)?;
 
-                let mut events = Events::new();
+                let mut events = Events::with_capacity(16);
                 let mut buffer = vec![0; 1024];
                 let mut index = 0;
                 loop {
                     events.clear();
-                    poller.wait(&mut events, None)?;
+                    poller.poll(&mut events, None)?;
                     log::info!("READ");
 
                     for event in events.iter() {
-                        if event.key == stream_key {
+                        if event.token() == stream_token {
                             index += stream.read(&mut buffer[index..])?;
                         }
                     }
@@ -87,46 +90,58 @@ fn run() -> std::io::Result<()> {
                         }
                     }
 
-                    poller.modify(&stream, Event::readable(stream_key))?;
+                    poller
+                        .registry()
+                        .reregister(&mut stream, stream_token, Interest::READABLE)?;
                 }
 
-                poller.modify(&stream, Event::writable(stream_key))?;
+                poller
+                    .registry()
+                    .reregister(&mut stream, stream_token, Interest::WRITABLE)?;
 
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-binary\r\nContent-Length: {FILE_SIZE}\r\n\r\n");
                 let mut index = 0;
                 while index < response.len() {
                     events.clear();
-                    poller.wait(&mut events, None)?;
+                    poller.poll(&mut events, None)?;
                     log::info!("WRITE HEADERS");
 
                     for event in events.iter() {
-                        if event.key == stream_key {
+                        if event.token() == stream_token {
                             index += stream.write(&response.as_bytes()[index..])?;
-                            poller.modify(&stream, Event::writable(stream_key))?;
                         }
                     }
+
+                    poller
+                        .registry()
+                        .reregister(&mut stream, stream_token, Interest::WRITABLE)?;
                 }
 
                 let mut index = 0;
                 while index < FILE_SIZE {
                     events.clear();
-                    poller.wait(&mut events, None)?;
+                    poller.poll(&mut events, None)?;
                     log::info!("WRITE BODY");
 
                     for event in events.iter() {
-                        if event.key == stream_key {
+                        if event.token() == stream_token {
                             index += stream.write(&FILE[index..])?;
-                            poller.modify(&stream, Event::writable(stream_key))?;
                         }
                     }
+
+                    poller
+                        .registry()
+                        .reregister(&mut stream, stream_token, Interest::WRITABLE)?;
                 }
 
-                poller.delete(&stream)?;
+                poller.registry().deregister(&mut stream)?;
                 stream.shutdown(Shutdown::Both)?;
                 log::info!("disconnected from {address}");
             }
         }
 
-        poller.modify(&socket, Event::readable(socket_key))?;
+        poller
+            .registry()
+            .reregister(&mut socket, socket_token, Interest::READABLE)?;
     }
 }
