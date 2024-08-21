@@ -1,2 +1,10 @@
-partition_table = "partitions.csv"
 baudrate = 2000000
+partition_table = "partitions.csv"
+
+[connection]
+
+[[usb_device]]
+vid = "1a86"
+pid = "55d3"
+
+[flash]

@@ -36,7 +36,7 @@ embassy = [
 log = { version = "0.4", default-features = false }
 esp-idf-hal = "0.44"
 esp-idf-svc = "0.49"
-tokio = { version = "1.39", features = ["net", "time", "rt", "io-util"] }
+polling = "3.7"
 
 [build-dependencies]
 embuild = "0.32.0"
