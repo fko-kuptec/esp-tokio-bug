@@ -1,27 +1,29 @@
-use std::{
-    io::{Read, Write},
-    net::{Shutdown, TcpListener},
+use edge_executor::LocalExecutor;
+use edge_http::{
+    io::server::{Connection, DefaultServer, Handler},
+    Method,
 };
-
+use edge_nal::TcpBind;
+use esp_idf_hal::{
+    cpu::Core,
+    io::asynch::{Read, Write},
+    task::{block_on, thread::ThreadSpawnConfiguration},
+};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     nvs::EspDefaultNvsPartition,
     wifi::{AccessPointConfiguration, AuthMethod, BlockingWifi, Configuration, EspWifi},
 };
-use polling::{Event, Events, Poller};
 
 static SSID: &str = "EspWifi";
 static PASSWORD: &str = "s0meth1ng";
-
-const FILE_SIZE: usize = 16 * 1024;
-static FILE: [u8; FILE_SIZE] = [0; FILE_SIZE];
 
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
     // Enable the use of the `eventfd` syscall for async runtimes
-    let _eventfd = esp_idf_svc::io::vfs::MountedEventfs::mount(5).unwrap();
+    esp_idf_svc::io::vfs::initialize_eventfd(5).unwrap();
 
     // Initialize WIFI peripheral
     let peripherals = esp_idf_hal::peripherals::Peripherals::take().unwrap();
@@ -40,93 +42,65 @@ fn main() {
     .unwrap();
     wifi.start().unwrap();
 
-    // Run HTTP server
-    run().unwrap();
+    // Spawn worker thread
+    ThreadSpawnConfiguration {
+        pin_to_core: Some(Core::Core0),
+        ..Default::default()
+    }
+    .set()
+    .unwrap();
+
+    std::thread::Builder::new()
+        .name("http-server".into())
+        .stack_size(32_000)
+        .spawn(move || {
+            let executor: LocalExecutor<'static> = LocalExecutor::new();
+            let task = executor.spawn(http_server());
+            block_on(executor.run(task))
+        })
+        .expect("failed to spawn worker thread")
+        .join()
+        .expect("worker thread panicked")
+        .expect("worker thread failed");
 }
 
-fn run() -> std::io::Result<()> {
-    let socket_key = 1337;
-    let socket = TcpListener::bind("0.0.0.0:80")?;
-    socket.set_nonblocking(true)?;
+async fn http_server() -> anyhow::Result<()> {
+    log::info!("before socket create"); // XXX
+    let socket = edge_nal_std::Stack::new()
+        .bind(([0, 0, 0, 0], 80).into())
+        .await?;
+    let mut server = DefaultServer::new();
 
-    let poller = Poller::new()?;
-    unsafe { poller.add(&socket, Event::readable(socket_key))? };
+    log::info!("before server run"); // XXX
+    server.run(socket, HttpHandler, None).await?;
 
-    let mut events = Events::new();
-    loop {
-        events.clear();
-        poller.wait(&mut events, None)?;
-        log::info!("ACCEPT");
+    Ok(())
+}
 
-        for event in events.iter() {
-            if event.key == socket_key {
-                let stream_key = 2664;
-                let (mut stream, address) = socket.accept()?;
-                log::info!("connected to {address}");
+struct HttpHandler;
 
-                stream.set_nonblocking(true)?;
-                unsafe { poller.add(&stream, Event::readable(stream_key))? };
+impl<'b, T, const N: usize> Handler<'b, T, N> for HttpHandler
+where
+    T: Read + Write,
+    T::Error: Send + Sync + std::error::Error + 'static,
+{
+    type Error = anyhow::Error;
 
-                let mut events = Events::new();
-                let mut buffer = vec![0; 1024];
-                let mut index = 0;
-                loop {
-                    events.clear();
-                    poller.wait(&mut events, None)?;
-                    log::info!("READ");
+    async fn handle(&self, conn: &mut Connection<'b, T, N>) -> Result<(), Self::Error> {
+        let headers = conn.headers()?;
 
-                    for event in events.iter() {
-                        if event.key == stream_key {
-                            index += stream.read(&mut buffer[index..])?;
-                        }
-                    }
+        if !matches!(headers.method, Some(Method::Get)) {
+            conn.initiate_response(405, Some("Method Not Allowed"), &[])
+                .await?;
+        } else if !matches!(headers.path, Some("/")) {
+            conn.initiate_response(404, Some("Not Found"), &[]).await?;
+        } else {
+            conn.initiate_response(200, Some("OK"), &[("Content-Type", "text/plain")])
+                .await?;
 
-                    if let Ok(request) = std::str::from_utf8(&buffer) {
-                        if request.contains("\r\n\r\n") {
-                            break;
-                        }
-                    }
-
-                    poller.modify(&stream, Event::readable(stream_key))?;
-                }
-
-                poller.modify(&stream, Event::writable(stream_key))?;
-
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-binary\r\nContent-Length: {FILE_SIZE}\r\n\r\n");
-                let mut index = 0;
-                while index < response.len() {
-                    events.clear();
-                    poller.wait(&mut events, None)?;
-                    log::info!("WRITE HEADERS");
-
-                    for event in events.iter() {
-                        if event.key == stream_key {
-                            index += stream.write(&response.as_bytes()[index..])?;
-                            poller.modify(&stream, Event::writable(stream_key))?;
-                        }
-                    }
-                }
-
-                let mut index = 0;
-                while index < FILE_SIZE {
-                    events.clear();
-                    poller.wait(&mut events, None)?;
-                    log::info!("WRITE BODY");
-
-                    for event in events.iter() {
-                        if event.key == stream_key {
-                            index += stream.write(&FILE[index..])?;
-                            poller.modify(&stream, Event::writable(stream_key))?;
-                        }
-                    }
-                }
-
-                poller.delete(&stream)?;
-                stream.shutdown(Shutdown::Both)?;
-                log::info!("disconnected from {address}");
-            }
+            conn.write_all(b"Hello world!").await?;
         }
 
-        poller.modify(&socket, Event::readable(socket_key))?;
+        Ok(())
     }
 }

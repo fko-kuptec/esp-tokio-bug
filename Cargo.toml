@@ -33,14 +33,23 @@ embassy = [
 ]
 
 [dependencies]
+anyhow = "1.0"
 log = { version = "0.4", default-features = false }
 esp-idf-hal = "0.44"
-esp-idf-svc = "0.49"
-polling = "3.7"
+esp-idf-svc = { version = "0.49", features = [
+    "critical-section",
+    "embassy-time-driver",
+] }
+embassy-time = { version = "0.3", features = ["generic-queue"] }
+async-io-mini = { git = "https://github.com/ivmarkov/async-io-mini.git" }
+edge-executor = "0.4.1"
+edge-nal-std = { package = "edge-nal-std", git = "https://github.com/ivmarkov/edge-net.git", features = [
+    "async-io-mini",
+] }
+edge-nal = { package = "edge-nal", git = "https://github.com/ivmarkov/edge-net.git" }
+edge-http = { package = "edge-http", git = "https://github.com/ivmarkov/edge-net.git", features = [
+    "std",
+] }
 
 [build-dependencies]
 embuild = "0.32.0"
-
-[patch.crates-io]
-esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
