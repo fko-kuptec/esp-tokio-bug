@@ -1,3 +1,76 @@
+## Update
+
+The executor was completely removed, as well as the direct usage of the `edge_http::HttpServer`. Instead, `edge_http::Connection` is directly used.
+
+There are two variations of that code. One variation can be chosen by commenting out the other call to `block_on` in lines 62-63:
+* `fn http_server_async_io()`: This works always, independent of logging or the default pthread stack size
+* `fn http_server_edge_nal_std()`: This works only, if one comments out the logging line. With logging, the code panics with the following output. Note, that if the default pthread stack size were not increased in the `sdkconfig.defaults`, the code would run into a stack overflow. This also does _not_ happen with the async-io version of the code.
+
+```log
+I (810) esp_tokio_bug: before socket create
+thread 'http-server' panicked at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/panicking.rs:219:5:
+unsafe precondition(s) violated: ptr::read requires that the pointer argument is aligned and non-null
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+abort() was called at PC 0x42030eb6 on core 0
+0x42030eb6 - std::sys::pal::unix::abort_internal
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/sys/pal/unix/mod.rs:366
+
+
+Backtrace: 0x40376a92:0x3fcb7b40 0x4037b5c5:0x3fcb7b60 0x40382992:0x3fcb7b80 0x42030eb6:0x3fcb7bf0 0x420350cc:0x3fcb7c10 0x4202f570:0x3fcb7cb0 0x4202f448:0x3fcb7ce0 0x42034e53:0x3fcb7d00 0x420581e6:0x3fcb7d30 0x420581c4:0x3fcb7d70 0x42058237:0x3fcb7d90 0x42017fa7:0x3fcb7dd0 0x42017c87:0x3fcb7df0 0x42017e37:0x3fcb83d0 0x42015a71:0x3fcb8670 0x42014b2e:0x3fcb8690 0x420149b6:0x3fcb86d0 0x4200845c:0x3fcb86f0 0x4200bddc:0x3fcb9590 0x420074b2:0x3fcbc0f0 0x42028beb:0x3fcbc120 0x42028c08:0x3fcbc150 0x420291a0:0x3fcbc180 0x4205a908:0x3fcbc1a0
+0x40376a92 - panic_abort
+    at /home/florian/projects/esp-tokio-bug/.embuild/espressif/esp-idf/v5.2.2/components/esp_system/panic.c:466
+0x4037b5c5 - esp_system_abort
+    at /home/florian/projects/esp-tokio-bug/.embuild/espressif/esp-idf/v5.2.2/components/esp_system/port/esp_system_chip.c:93
+0x40382992 - abort
+    at /home/florian/projects/esp-tokio-bug/.embuild/espressif/esp-idf/v5.2.2/components/newlib/abort.c:38
+0x42030eb6 - std::sys::pal::unix::abort_internal
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/sys/pal/unix/mod.rs:366
+0x420350cc - std::panicking::rust_panic_with_hook
+    at ??:??
+0x4202f570 - std::panicking::begin_panic_handler::{{closure}}
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/panicking.rs:656
+0x4202f448 - std::sys_common::backtrace::__rust_end_short_backtrace
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/sys_common/backtrace.rs:171
+0x42034e53 - rust_begin_unwind
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/panicking.rs:652
+0x420581e6 - core::panicking::panic_nounwind_fmt::runtime
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/panicking.rs:110
+0x420581c4 - core::panicking::panic_nounwind_fmt
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/panicking.rs:120
+0x42058237 - core::panicking::panic_nounwind
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/panicking.rs:219
+0x42017fa7 - core::ptr::read::precondition_check
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/ub_checks.rs:68
+0x42017c87 - core::ptr::read
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/core/src/ub_checks.rs:75
+0x42017e37 - async_lock::once_cell::OnceCell<T>::get_or_try_init_blocking
+    at /home/florian/.cargo/registry/src/index.crates.io-6f17d22bba15001f/async-lock-3.4.0/src/once_cell.rs:451
+0x42015a71 - async_lock::once_cell::OnceCell<T>::get_or_init_blocking
+    at /home/florian/.cargo/registry/src/index.crates.io-6f17d22bba15001f/async-lock-3.4.0/src/once_cell.rs:516
+0x42014b2e - <async_io::Timer as futures_core::stream::Stream>::poll_next
+    at /home/florian/.cargo/registry/src/index.crates.io-6f17d22bba15001f/async-io-2.3.4/src/lib.rs:502
+0x420149b6 - <async_io::Timer as core::future::future::Future>::poll
+    at /home/florian/.cargo/registry/src/index.crates.io-6f17d22bba15001f/async-io-2.3.4/src/lib.rs:467
+0x4200845c - <edge_nal_std::TcpAcceptor as edge_nal::stack::tcp::TcpAccept>::accept::{{closure}}
+    at /home/florian/.cargo/git/checkouts/edge-net-465b5694b2f162db/947929d/edge-nal-std/src/lib.rs:95
+0x4200bddc - esp_tokio_bug::main::{{closure}}
+    at /home/florian/projects/esp-tokio-bug/src/main.rs:63
+0x420074b2 - std::thread::Builder::spawn_unchecked_::{{closure}}::{{closure}}
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/thread/mod.rs:542
+0x42028beb - <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2063
+0x42028c08 - <alloc::boxed::Box<F,A> as core::ops::function::FnOnce<Args>>::call_once
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2063
+0x420291a0 - std::sys::pal::unix::thread::Thread::new::thread_start
+    at /home/florian/.rustup/toolchains/esp/lib/rustlib/src/rust/library/std/src/sys/pal/unix/thread.rs:108
+0x4205a908 - pthread_task_func
+    at /home/florian/projects/esp-tokio-bug/.embuild/espressif/esp-idf/v5.2.2/components/pthread/pthread.c:196
+```
+
+## Previous State
+
 This example panics, when run on an ESP32-S3. The panics are different, however, if the `log::info!(); // XXX` calls in the `http_server()` function are included or not:
 
 With logs:

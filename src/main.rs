@@ -1,9 +1,12 @@
-use edge_executor::LocalExecutor;
+use std::net::TcpListener;
+
+use async_io_mini::Async;
 use edge_http::{
-    io::server::{Connection, DefaultServer, Handler},
+    io::server::{Connection, Handler},
     Method,
 };
-use edge_nal::TcpBind;
+use edge_nal::{TcpAccept, TcpBind};
+use edge_nal_std::{Stack, TcpSocket};
 use esp_idf_hal::{
     cpu::Core,
     io::asynch::{Read, Write},
@@ -54,9 +57,10 @@ fn main() {
         .name("http-server".into())
         .stack_size(32_000)
         .spawn(move || {
-            let executor: LocalExecutor<'static> = LocalExecutor::new();
-            let task = executor.spawn(http_server());
-            block_on(executor.run(task))
+            let mut buffer = [0; 10_000];
+
+            // block_on(http_server_async_io(&mut buffer))
+            block_on(http_server_edge_nal_std(&mut buffer))
         })
         .expect("failed to spawn worker thread")
         .join()
@@ -64,15 +68,36 @@ fn main() {
         .expect("worker thread failed");
 }
 
-async fn http_server() -> anyhow::Result<()> {
+/// Works, even with logging and default pthread stack size
+async fn http_server_async_io(buffer: &mut [u8]) -> anyhow::Result<()> {
     log::info!("before socket create"); // XXX
-    let socket = edge_nal_std::Stack::new()
-        .bind(([0, 0, 0, 0], 80).into())
-        .await?;
-    let mut server = DefaultServer::new();
+    let socket = Async::<TcpListener>::bind(([0, 0, 0, 0], 80)).unwrap();
 
-    log::info!("before server run"); // XXX
-    server.run(socket, HttpHandler, None).await?;
+    while let Ok((stream, _)) = socket.accept().await {
+        let stream = TcpSocket::new(stream);
+        let mut connection = Connection::<_, 32>::new(buffer, stream, None)
+            .await
+            .unwrap();
+        HttpHandler.handle(&mut connection).await.unwrap();
+    }
+
+    Ok(())
+}
+
+/// * Works, if the logging line marked with `// XXX` is commented out and the
+///   default pthread stack size is increased.
+/// * Crashes, if the logging line is kept or the default pthread stack size is
+///   not increased.
+async fn http_server_edge_nal_std(buffer: &mut [u8]) -> anyhow::Result<()> {
+    log::info!("before socket create"); // XXX
+    let socket = Stack::new().bind(([0, 0, 0, 0], 80).into()).await.unwrap();
+
+    while let Ok((_, stream)) = socket.accept().await {
+        let mut connection = Connection::<_, 32>::new(buffer, stream, None)
+            .await
+            .unwrap();
+        HttpHandler.handle(&mut connection).await.unwrap();
+    }
 
     Ok(())
 }
@@ -90,13 +115,18 @@ where
         let headers = conn.headers()?;
 
         if !matches!(headers.method, Some(Method::Get)) {
-            conn.initiate_response(405, Some("Method Not Allowed"), &[])
+            conn.initiate_response(405, Some("Method Not Allowed"), &[("Content-Length", "0")])
                 .await?;
         } else if !matches!(headers.path, Some("/")) {
-            conn.initiate_response(404, Some("Not Found"), &[]).await?;
-        } else {
-            conn.initiate_response(200, Some("OK"), &[("Content-Type", "text/plain")])
+            conn.initiate_response(404, Some("Not Found"), &[("Content-Length", "0")])
                 .await?;
+        } else {
+            conn.initiate_response(
+                200,
+                Some("OK"),
+                &[("Content-Type", "text/plain"), ("Content-Length", "12")],
+            )
+            .await?;
 
             conn.write_all(b"Hello world!").await?;
         }
